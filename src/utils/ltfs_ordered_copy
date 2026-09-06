@@ -281,7 +281,8 @@ class Progress:
         self.current_file += 1
         if self.logger.getEffectiveLevel() == INFO:
             if self.tqdm is not None:
-                self.tqdm.set_description(f'{name} [{self.current_file} / {self.total_files}]')
+                self.tqdm.set_description('{} [{} / {}]'.format(
+                    name, self.current_file, self.total_files))
             else:
                 sys.stderr.write('\r{}: {}/{}'.format(self.title, self.current_file, self.total_files))
                 sys.stderr.flush()
