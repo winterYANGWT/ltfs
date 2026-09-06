@@ -1,0 +1,116 @@
+# syntax=docker/dockerfile:1.7
+
+# Runtime-only images for EOL APT distributions. Builder and Runtime deliberately
+# use the same base release so the installed artifacts retain that release's
+# glibc floor. Frozen package archives receive no security updates.
+
+ARG BASE_IMAGE=debian:11
+
+FROM ${BASE_IMAGE} AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG DISTRO_ID
+
+# Same LANG rationale as the runtime stage below.
+ENV LANG=en_US.UTF-8
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+COPY --chmod=0755 docker/autotools/scripts/configure-eol-repositories.sh /usr/local/bin/ltfs-configure-eol-repositories
+
+RUN ltfs-configure-eol-repositories "$DISTRO_ID" \
+	&& apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		autoconf \
+		automake \
+		binutils \
+		build-essential \
+		icu-devtools \
+		libfuse-dev \
+		libicu-dev \
+		libtool \
+		libxml2-dev \
+		pkg-config \
+		python3 \
+		tar \
+		uuid-dev \
+	&& ln -sf "$(command -v python3)" /usr/local/bin/python
+
+COPY --chmod=0755 docker/autotools/scripts/build.sh /usr/local/bin/ltfs-autotools-build
+COPY --chmod=0755 docker/autotools/scripts/icu-config /usr/local/bin/icu-config
+COPY --chmod=0755 docker/autotools/scripts/check-glibc-floor.sh /usr/local/bin/ltfs-check-glibc-floor
+
+COPY . /workspace
+
+ARG LTFS_MAX_GLIBC_SYMBOL
+
+RUN SOURCE_DIR=/workspace \
+	OUTPUT_DIR=/tmp/ltfs-stage \
+	AUTOTOOLS_PROFILE=runtime-file \
+	/usr/local/bin/ltfs-autotools-build \
+	&& find /tmp/ltfs-stage/usr/local -type f -name '*.la' -delete \
+	&& rm -rf \
+		/tmp/ltfs-stage/usr/local/include \
+		/tmp/ltfs-stage/usr/local/lib/pkgconfig \
+		/tmp/ltfs-stage/usr/local/share/aclocal \
+	&& LTFS_MAX_GLIBC_SYMBOL="$LTFS_MAX_GLIBC_SYMBOL" \
+		/usr/local/bin/ltfs-check-glibc-floor /tmp/ltfs-stage
+
+FROM ${BASE_IMAGE} AS runtime
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG DISTRO_ID
+ARG RUNTIME_PACKAGES="fuse libfuse2 libicu67 libxml2"
+ARG PYTHON_XATTR_PACKAGE=python3-xattr
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+COPY --chmod=0755 docker/autotools/scripts/configure-eol-repositories.sh /usr/local/bin/ltfs-configure-eol-repositories
+
+RUN ltfs-configure-eol-repositories "$DISTRO_ID" \
+	&& apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		libuuid1 \
+		python3 \
+		${PYTHON_XATTR_PACKAGE} \
+		${RUNTIME_PACKAGES} \
+	&& apt-get clean \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& ln -sf "$(command -v python3)" /usr/local/bin/python \
+	&& install -d /mnt/ltfs /var/lib/ltfs
+
+COPY --from=builder /tmp/ltfs-stage/usr/local/ /usr/local/
+COPY --chmod=0755 docker/autotools/scripts/runtime-entrypoint.sh /usr/local/bin/ltfs-autotools-entrypoint
+COPY --chmod=0755 docker/autotools/scripts/format-file-backend-test.sh /usr/local/bin/ltfs-autotools-format-file-backend-test
+COPY --chmod=0755 docker/autotools/scripts/self-test.sh /usr/local/bin/ltfs-autotools-self-test
+COPY --chmod=0755 docker/autotools/scripts/smoke-test.sh /usr/local/bin/ltfs-autotools-smoke-test
+
+# ltfs, ltfsck, and mkltfs each set LANG to en_US.UTF-8 when it is unset, but
+# only after writing LTFS9015W to stderr, which then leads every invocation's
+# output. Setting the same value they would choose keeps behaviour identical
+# and keeps the first line of `ltfs --version` the version.
+ENV LANG=en_US.UTF-8 \
+	LTFS_IMAGE_ROLE=runtime
+
+# Records the source commit, then asserts the runtime cannot compile. ld and as
+# are off that list on purpose: the RPM bases ship binutils, removing it frees
+# nothing because the content is in the base layer, and a linker without a
+# compiler builds nothing. See README.md.
+ARG SOURCE_REVISION=unknown
+RUN printf '/usr/local/lib\n' >/etc/ld.so.conf.d/ltfs.conf \
+	&& ldconfig \
+	&& install -d /usr/local/share/ltfs-autotools \
+	&& printf 'revision=%s\n' "$SOURCE_REVISION" \
+		>/usr/local/share/ltfs-autotools/build-revision \
+	&& /usr/local/bin/ltfs-autotools-self-test \
+	&& for cmd in gcc cc c++ g++ make autoconf automake libtoolize; do \
+		if command -v "$cmd" >/dev/null 2>&1; then \
+			echo "runtime image must not ship $cmd" >&2; \
+			exit 1; \
+		fi; \
+	done
+
+VOLUME ["/var/lib/ltfs", "/mnt/ltfs"]
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/ltfs-autotools-entrypoint"]
+CMD ["ltfs", "--help"]

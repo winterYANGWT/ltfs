@@ -1,0 +1,44 @@
+#!/bin/sh
+
+set -eu
+
+# LTFS still probes the traditional icu-config interface on distributions that only ship pkg-config.
+# Keep this compatibility shim intentionally small and delegate all values to the installed ICU data.
+if [ "$#" -ne 1 ]; then
+	printf 'usage: icu-config OPTION\n' >&2
+	exit 64
+fi
+
+case "$1" in
+	--cppflags)
+		exec pkg-config --cflags icu-uc
+		;;
+	--ldflags)
+		exec pkg-config --libs icu-uc
+		;;
+	--version)
+		exec pkg-config --modversion icu-uc
+		;;
+	--prefix)
+		exec pkg-config --variable=prefix icu-uc
+		;;
+	--exec-prefix)
+		exec pkg-config --variable=exec_prefix icu-uc
+		;;
+	--incpkgdatafile)
+		# ICU has used both versioned and unversioned locations for pkgdata.inc.
+		libdir=$(pkg-config --variable=libdir icu-uc)
+		for candidate in "$libdir"/icu/*/pkgdata.inc "$libdir"/icu/pkgdata.inc; do
+			if [ -f "$candidate" ]; then
+				printf '%s\n' "$candidate"
+				exit 0
+			fi
+		done
+		printf 'icu-config: pkgdata.inc not found below %s\n' "$libdir" >&2
+		exit 1
+		;;
+	*)
+		printf 'icu-config: unsupported option: %s\n' "$1" >&2
+		exit 64
+		;;
+esac

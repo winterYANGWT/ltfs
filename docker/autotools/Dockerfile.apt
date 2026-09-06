@@ -1,0 +1,178 @@
+# syntax=docker/dockerfile:1.7
+
+# One parameterized file covers every APT-based distribution and produces the
+# CI, Dev, and Runtime images. Bake supplies the base images and the runtime
+# library package names; every stage behaves identically across distributions.
+
+ARG BASE_IMAGE=debian:13
+ARG RUNTIME_BASE_IMAGE=debian:13-slim
+
+# CI carries the complete Autotools toolchain and builds a mounted source tree.
+FROM ${BASE_IMAGE} AS ci-base
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+	--mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		autoconf \
+		automake \
+		bash \
+		build-essential \
+		ca-certificates \
+		icu-devtools \
+		libfuse-dev \
+		libicu-dev \
+		libsnmp-dev \
+		libtool \
+		libxml2-dev \
+		pkg-config \
+		python-is-python3 \
+		python3 \
+		tar \
+		uuid-dev
+
+COPY --chmod=0755 docker/autotools/scripts/build.sh /usr/local/bin/ltfs-autotools-build
+COPY --chmod=0755 docker/autotools/scripts/icu-config /usr/local/bin/icu-config
+COPY --chmod=0755 docker/autotools/scripts/runtime-entrypoint.sh /usr/local/bin/ltfs-autotools-entrypoint
+COPY --chmod=0755 docker/autotools/scripts/self-test.sh /usr/local/bin/ltfs-autotools-self-test
+COPY --chmod=0755 docker/autotools/scripts/smoke-test.sh /usr/local/bin/ltfs-autotools-smoke-test
+
+# ltfs, ltfsck, and mkltfs each set LANG to en_US.UTF-8 when it is unset, but
+# only after writing LTFS9015W to stderr, which then leads every invocation's
+# output. Setting the same value they would choose keeps behaviour identical
+# and keeps the first line of `ltfs --version` the version. Every stage sets
+# it, so the warning cannot come back in one role after being fixed in another.
+ENV AUTOTOOLS_PROFILE=default \
+	LANG=en_US.UTF-8 \
+	LTFS_IMAGE_ROLE=ci
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/ltfs-autotools-entrypoint"]
+CMD ["build"]
+
+# Compile, install, and smoke-test the current source in a disposable stage.
+# The published CI image receives only the pass marker, never the source tree.
+FROM ci-base AS ci-validation
+
+COPY . /workspace
+
+# Without the revision a passing marker cannot be traced back to its source.
+ARG SOURCE_REVISION=unknown
+RUN LTFS_SELF_TEST_BUILD_SOURCE=1 \
+	LTFS_SELF_TEST_REQUIRE_SOURCE=1 \
+	LTFS_SELF_TEST_INSTALL_TO_ROOT=1 \
+	/usr/local/bin/ltfs-autotools-self-test \
+	&& printf 'source-build-and-smoke-test=passed\nrevision=%s\n' \
+		"$SOURCE_REVISION" >/tmp/ci-build-self-test
+
+FROM ci-base AS ci
+
+COPY --from=ci-validation /tmp/ci-build-self-test /usr/local/share/ltfs-autotools/ci-build-self-test
+
+# Dev extends CI with interactive tools and intentionally runs as root for
+# low-level LTFS, FUSE, and device debugging.
+FROM ci AS dev
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+	--mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		ccache \
+		file \
+		gdb \
+		git \
+		less \
+		procps \
+		python3-xattr \
+		strace \
+		vim-tiny \
+	&& install -d \
+		/workspace \
+		/out \
+		/root/.cache/ccache
+
+ENV HOME=/root \
+	CCACHE_DIR=/root/.cache/ccache \
+	LTFS_IMAGE_ROLE=dev
+
+WORKDIR /workspace
+RUN /usr/local/bin/ltfs-autotools-self-test
+ENTRYPOINT ["/usr/local/bin/ltfs-autotools-entrypoint"]
+CMD ["/bin/bash"]
+
+# Build Runtime artifacts separately so compiler tools never enter the final image.
+FROM ci AS runtime-builder
+
+COPY . /workspace
+
+RUN SOURCE_DIR=/workspace \
+	OUTPUT_DIR=/tmp/ltfs-stage \
+	AUTOTOOLS_PROFILE=runtime-file \
+	/usr/local/bin/ltfs-autotools-build \
+	&& find /tmp/ltfs-stage/usr/local -type f -name '*.la' -delete \
+	&& rm -rf \
+		/tmp/ltfs-stage/usr/local/include \
+		/tmp/ltfs-stage/usr/local/lib/pkgconfig \
+		/tmp/ltfs-stage/usr/local/share/aclocal
+
+# Runtime ships the sg, file, and itdtimg backends but defaults to file.
+# Driving real hardware is a run-time concern: pass through /dev/sg* and
+# select the backend with -o tape_backend=sg.
+FROM ${RUNTIME_BASE_IMAGE} AS runtime
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG RUNTIME_PACKAGES="fuse3 libfuse2t64 libicu76 libxml2"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+	--mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		bash \
+		libuuid1 \
+		python3 \
+		python3-xattr \
+		${RUNTIME_PACKAGES} \
+	&& ln -s /usr/bin/python3 /usr/local/bin/python \
+	&& install -d /mnt/ltfs /var/lib/ltfs
+
+COPY --from=runtime-builder /tmp/ltfs-stage/usr/local/ /usr/local/
+COPY --chmod=0755 docker/autotools/scripts/runtime-entrypoint.sh /usr/local/bin/ltfs-autotools-entrypoint
+COPY --chmod=0755 docker/autotools/scripts/format-file-backend-test.sh /usr/local/bin/ltfs-autotools-format-file-backend-test
+COPY --chmod=0755 docker/autotools/scripts/self-test.sh /usr/local/bin/ltfs-autotools-self-test
+COPY --chmod=0755 docker/autotools/scripts/smoke-test.sh /usr/local/bin/ltfs-autotools-smoke-test
+
+# Runtime starts from its own base, so it repeats the LANG setting ci-base
+# makes; see the comment there.
+ENV LANG=en_US.UTF-8 \
+	LTFS_IMAGE_ROLE=runtime
+
+# Records the source commit, then asserts the runtime cannot compile. ld and as
+# are off that list on purpose: the RPM bases ship binutils, removing it frees
+# nothing because the content is in the base layer, and a linker without a
+# compiler builds nothing. See README.md.
+ARG SOURCE_REVISION=unknown
+RUN printf '/usr/local/lib\n' >/etc/ld.so.conf.d/ltfs.conf \
+	&& ldconfig \
+	&& install -d /usr/local/share/ltfs-autotools \
+	&& printf 'revision=%s\n' "$SOURCE_REVISION" \
+		>/usr/local/share/ltfs-autotools/build-revision \
+	&& /usr/local/bin/ltfs-autotools-self-test \
+	&& for cmd in gcc cc c++ g++ make autoconf automake libtoolize; do \
+		if command -v "$cmd" >/dev/null 2>&1; then \
+			echo "runtime image must not ship $cmd" >&2; \
+			exit 1; \
+		fi; \
+	done
+
+VOLUME ["/var/lib/ltfs", "/mnt/ltfs"]
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/ltfs-autotools-entrypoint"]
+CMD ["ltfs", "--help"]

@@ -1,0 +1,100 @@
+# Builds lifecycle-scoped Autotools container images and discards the result.
+#
+# Each target compiles the current source and runs its smoke test inside the
+# build itself, so a green run means LTFS built and passed its checks on every
+# distribution in the matrix. Publication is intentionally not enabled here:
+# to publish, replace the cacheonly output with `push: true`, add a registry
+# login step, and grant the job `packages: write`.
+name: Autotools container images
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autotools-images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  supported:
+    name: Build and self-test supported images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out LTFS and submodules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Check scripts and build definition
+        run: |
+          bash docker/autotools/tests/test-image-entrypoint.sh
+          bash -n docker/autotools/scripts/*.sh docker/autotools/tests/*.sh
+          sh -n docker/autotools/scripts/icu-config
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Check bake definition
+        run: docker buildx bake -f docker/docker-bake.hcl --check
+
+      - name: Build supported targets
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          source: .
+          files: docker/docker-bake.hcl
+          targets: default
+          pull: true
+          set: |
+            *.output=type=cacheonly
+            *.cache-from=type=gha,scope=autotools-supported
+            *.cache-to=type=gha,scope=autotools-supported,mode=max
+        env:
+          # Stamps the images and the build marker with the commit they came
+          # from; without it every image reports REVISION=local.
+          REVISION: ${{ github.sha }}
+
+  eol:
+    name: Build and self-test EOL Runtime images
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out LTFS and submodules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build EOL Runtime targets
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          source: .
+          files: docker/docker-bake.hcl
+          targets: eol
+          pull: true
+          set: |
+            *.output=type=cacheonly
+            *.cache-from=type=gha,scope=autotools-eol
+            *.cache-to=type=gha,scope=autotools-eol,mode=max
+        env:
+          # Stamps the images and the build marker with the commit they came
+          # from; without it every image reports REVISION=local.
+          REVISION: ${{ github.sha }}
