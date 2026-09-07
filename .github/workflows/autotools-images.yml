@@ -7,13 +7,13 @@
 # login step, and grant the job `packages: write`.
 name: Autotools container images
 
+# Push and pull_request carry no filters on purpose, matching the first-generation
+# build workflows: any branch, any tag. A branch filter here meant the matrix never
+# ran on the release branch it was developed on. Tag pushes still reach the eol job
+# through its own `if:` below.
 on:
-  pull_request:
   push:
-    branches:
-      - main
-    tags:
-      - "v*"
+  pull_request:
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
