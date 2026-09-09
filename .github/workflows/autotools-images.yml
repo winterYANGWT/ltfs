@@ -1,10 +1,15 @@
-# Builds lifecycle-scoped Autotools container images and discards the result.
+# Builds the in-support Autotools container images and discards the result.
 #
 # Each target compiles the current source and runs its smoke test inside the
 # build itself, so a green run means LTFS built and passed its checks on every
 # distribution in the matrix. Publication is intentionally not enabled here:
 # to publish, replace the cacheonly output with `push: true`, add a registry
 # login step, and grant the job `packages: write`.
+#
+# EOL images are deliberately absent. They exist for people who need to run
+# LTFS on an old userspace and are built from a clone by whoever needs one, so
+# spending CI on them every week would buy nothing the maintainers act on. Their
+# bake definitions are still linted below.
 #
 # One job per distribution. The distributions are read out of the bake groups
 # rather than listed here, so adding one to docker-bake.hcl is enough to get it
@@ -13,8 +18,8 @@ name: Autotools container images
 
 # Push and pull_request carry no filters on purpose, matching the first-generation
 # build workflows: any branch, any tag. A branch filter here meant the matrix never
-# ran on the release branch it was developed on. Tag pushes still reach the eol job
-# through its own `if:` below.
+# ran on the release branch it was developed on. The weekly schedule catches base
+# images drifting under us when nobody has pushed.
 on:
   push:
   pull_request:
@@ -36,7 +41,6 @@ jobs:
     timeout-minutes: 10
     outputs:
       supported: ${{ steps.distributions.outputs.supported }}
-      eol: ${{ steps.distributions.outputs.eol }}
     steps:
       - name: Check out LTFS and submodules
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -54,21 +58,20 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Check bake definition
-        run: docker buildx bake -f docker/docker-bake.hcl --check
+        # `all` so the EOL definitions are still linted. Nothing builds them
+        # here -- linting costs seconds and keeps a broken definition from
+        # shipping to the people who do build them.
+        run: docker buildx bake -f docker/docker-bake.hcl all --check
 
       - name: Collect distributions from the bake groups
         id: distributions
         run: |
-          # Every group target is named <role>-<distribution>. The dev group
-          # names each supported distribution exactly once, the eol group each
-          # EOL one.
+          # Every group target is named <role>-<distribution>, and the dev group
+          # names each in-support distribution exactly once.
           supported=$(docker buildx bake -f docker/docker-bake.hcl dev --print \
             | jq -c '[.group.dev.targets[] | sub("^dev-"; "")]')
-          eol=$(docker buildx bake -f docker/docker-bake.hcl eol --print \
-            | jq -c '[.group.eol.targets[] | sub("^runtime-"; "")]')
           printf 'supported=%s\n' "$supported" >>"$GITHUB_OUTPUT"
-          printf 'eol=%s\n' "$eol" >>"$GITHUB_OUTPUT"
-          printf 'supported: %s\neol: %s\n' "$supported" "$eol"
+          printf 'supported: %s\n' "$supported"
 
   supported:
     name: Supported ${{ matrix.distribution }}
@@ -126,43 +129,4 @@ jobs:
             *.cache-from=type=gha,scope=autotools-${{ matrix.distribution }}
             *.cache-to=type=gha,scope=autotools-${{ matrix.distribution }},mode=max
         env:
-          REVISION: ${{ github.sha }}
-
-  eol:
-    name: EOL ${{ matrix.distribution }}
-    needs: checks
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        distribution: ${{ fromJSON(needs.checks.outputs.eol) }}
-    steps:
-      - name: Check out LTFS and submodules
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Build the EOL Runtime image
-        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
-        with:
-          source: .
-          files: docker/docker-bake.hcl
-          targets: runtime-${{ matrix.distribution }}
-          pull: true
-          set: |
-            *.output=type=cacheonly
-            *.cache-from=type=gha,scope=autotools-${{ matrix.distribution }}
-            *.cache-to=type=gha,scope=autotools-${{ matrix.distribution }},mode=max
-        env:
-          # Stamps the images and the build marker with the commit they came
-          # from; without it every image reports REVISION=local.
           REVISION: ${{ github.sha }}
