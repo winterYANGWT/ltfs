@@ -51,7 +51,9 @@ build time:
 
 > EOL base systems and their frozen archives receive no security updates. They
 > exist for deployments that must match an old userspace, kernel, or Docker, and
-> must not be pushed to a public registry without a product owner accepting that.
+> are built from a clone rather than published — see
+> [Publishing policy](#publishing-policy). Pushing one to a public registry
+> requires a product owner explicitly accepting that risk.
 
 ## Roles
 
@@ -165,14 +167,47 @@ their own release.
 
 ## CI and publishing
 
-`.github/workflows/autotools-images.yml` runs a `supported` job on every trigger
-— pull requests, pushes to main, `v*` tags, a weekly schedule, and manual
-dispatch — and an `eol` job only on schedule, manual dispatch, and `v*` tags.
-Both output `cacheonly` with separate GitHub Actions cache scopes, so they
-validate without publishing.
+`.github/workflows/autotools-images.yml` derives its distribution list from the
+bake groups, then fans out one job per distribution. The `supported` jobs run on
+every push and pull request, on a weekly schedule, and on manual dispatch; the
+`eol` jobs run only on schedule, manual dispatch, and `v*` tags. Every job
+outputs `cacheonly` into a per-distribution cache scope, so they validate
+without publishing.
 
 Publishing supported images means adding a registry login, `packages: write`,
-and `push: true`. See the EOL warning above before publishing any EOL image.
+and `push: true`.
+
+### Publishing policy
+
+An image is published only while its distribution is in upstream support.
+
+| Situation | What happens |
+| --- | --- |
+| Distribution is in support | Published, and refreshed by every build |
+| Distribution reaches EOL | Refreshes stop; tags already published stay as they are |
+| Distribution was already EOL when added here | Never published |
+
+Three consequences worth stating plainly:
+
+- **EOL images are a build-it-yourself option, not a product.** Clone the
+  repository and run `docker buildx bake -f docker/docker-bake.hcl eol` to get
+  one for your own use. They install from frozen third-party archives with
+  signature verification relaxed or off, so whoever builds one is the one
+  accepting that supply chain. That decision does not belong baked into an
+  artifact handed to someone else.
+- **Published tags are frozen, not withdrawn.** A tag someone already pinned
+  keeps working; it simply stops receiving new content, exactly like the
+  distribution it was built from. Withdrawing it would break consumers without
+  making anyone safer.
+- **The transition is a deliberate edit, never a date.** Moving a distribution
+  from `APT_DISTRIBUTIONS` / `RPM_DISTRIBUTIONS` to the matching `EOL_*` list in
+  `docker-bake.hcl` does all three things at once: it leaves the published
+  groups, it drops to `runtime` only, and it switches to archive repositories.
+  Nothing here computes a lifecycle from the clock — see the invariants in
+  [`autotools/README.md`](autotools/README.md).
+
+Adding a newly released distribution is the same edit in reverse, and is
+expected to happen more often than retirement.
 
 ## Changing anything here
 
