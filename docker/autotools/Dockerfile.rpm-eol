@@ -1,0 +1,138 @@
+# syntax=docker/dockerfile:1.7
+
+# Runtime-only images for EOL RPM distributions.
+#
+# EOL distributions get the runtime role only: the point is to run LTFS on an
+# old host whose kernel or Docker is too old for a modern image. The toolchain
+# lives in a throwaway builder stage, so no CI or Dev image is published.
+
+ARG BASE_IMAGE=centos:centos7
+
+FROM ${BASE_IMAGE} AS builder
+
+ARG DISTRO_ID
+ARG EXTRA_BUILD_PACKAGES=""
+
+# Same LANG rationale as the runtime stage below. Parameterised because
+# CentOS 7's glibc 2.17 predates C.UTF-8; bake supplies en_US.UTF-8 there,
+# which that base image does generate.
+ARG IMAGE_LANG=C.UTF-8
+ENV LANG=${IMAGE_LANG}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+COPY --chmod=0755 docker/autotools/scripts/configure-eol-repositories.sh /usr/local/bin/ltfs-configure-eol-repositories
+
+RUN ltfs-configure-eol-repositories "$DISTRO_ID" \
+	&& yum -y install \
+		autoconf \
+		automake \
+		binutils \
+		diffutils \
+		findutils \
+		fuse-devel \
+		gcc \
+		icu \
+		libattr-devel \
+		libicu-devel \
+		libtool \
+		libuuid-devel \
+		libxml2-devel \
+		make \
+		net-snmp-devel \
+		pkgconfig \
+		python3 \
+		python3-devel \
+		python3-pip \
+		tar \
+		which \
+		${EXTRA_BUILD_PACKAGES} \
+	&& ln -sf "$(command -v python3)" /usr/local/bin/python
+
+COPY --chmod=0755 docker/autotools/scripts/build.sh /usr/local/bin/ltfs-autotools-build
+COPY --chmod=0755 docker/autotools/scripts/icu-config /usr/local/bin/icu-config
+COPY --chmod=0755 docker/autotools/scripts/check-glibc-floor.sh /usr/local/bin/ltfs-check-glibc-floor
+
+COPY . /workspace
+
+ARG LTFS_MAX_GLIBC_SYMBOL
+# Some EOL distributions package pyxattr for Python 2 only, so ltfs_ordered_copy
+# has no xattr module. Building it into the same staging tree keeps the runtime
+# image free of a compiler while still shipping a working ltfs_ordered_copy.
+ARG PYXATTR_VIA_PIP=0
+
+RUN SOURCE_DIR=/workspace \
+	OUTPUT_DIR=/tmp/ltfs-stage \
+	AUTOTOOLS_PROFILE=runtime-file \
+	/usr/local/bin/ltfs-autotools-build \
+	&& find /tmp/ltfs-stage/usr/local -type f -name '*.la' -delete \
+	&& rm -rf \
+		/tmp/ltfs-stage/usr/local/include \
+		/tmp/ltfs-stage/usr/local/lib/pkgconfig \
+		/tmp/ltfs-stage/usr/local/share/aclocal \
+	&& if [[ "$PYXATTR_VIA_PIP" == 1 ]]; then \
+		pip3 install --no-cache-dir --prefix=/tmp/ltfs-stage/usr/local pyxattr==0.8.0; \
+	fi \
+	&& LTFS_MAX_GLIBC_SYMBOL="$LTFS_MAX_GLIBC_SYMBOL" \
+		/usr/local/bin/ltfs-check-glibc-floor /tmp/ltfs-stage
+
+FROM ${BASE_IMAGE} AS runtime
+
+ARG DISTRO_ID
+ARG RUNTIME_PACKAGES="fuse-libs libicu libuuid libxml2"
+ARG EXTRA_RUNTIME_PACKAGES=""
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+COPY --chmod=0755 docker/autotools/scripts/configure-eol-repositories.sh /usr/local/bin/ltfs-configure-eol-repositories
+
+RUN ltfs-configure-eol-repositories "$DISTRO_ID" \
+	&& yum -y install \
+		findutils \
+		python3 \
+		${RUNTIME_PACKAGES} \
+		${EXTRA_RUNTIME_PACKAGES} \
+	&& yum clean all \
+	&& rm -rf /var/cache/yum \
+	&& ln -sf "$(command -v python3)" /usr/local/bin/python \
+	&& install -d /mnt/ltfs /var/lib/ltfs
+
+COPY --from=builder /tmp/ltfs-stage/usr/local/ /usr/local/
+COPY --chmod=0755 docker/autotools/scripts/runtime-entrypoint.sh /usr/local/bin/ltfs-autotools-entrypoint
+COPY --chmod=0755 docker/autotools/scripts/format-file-backend-test.sh /usr/local/bin/ltfs-autotools-format-file-backend-test
+COPY --chmod=0755 docker/autotools/scripts/self-test.sh /usr/local/bin/ltfs-autotools-self-test
+COPY --chmod=0755 docker/autotools/scripts/smoke-test.sh /usr/local/bin/ltfs-autotools-smoke-test
+
+# ltfs, ltfsck, and mkltfs each set LANG when it is unset, but only after
+# writing LTFS9015W to stderr, which then leads every invocation's output.
+# Setting it here keeps the first line of `ltfs --version` the version.
+#
+# C.UTF-8, not the en_US.UTF-8 those tools would pick: an ungenerated locale
+# makes setlocale(LC_CTYPE, "") return NULL, which libfuse 2.9.9 dereferences
+# unguarded while printing module help, segfaulting `ltfs -a`.
+ARG IMAGE_LANG=C.UTF-8
+ENV LANG=${IMAGE_LANG} \
+	LTFS_IMAGE_ROLE=runtime
+
+# Records the source commit, then asserts the runtime cannot compile. ld and as
+# are off that list on purpose: the RPM bases ship binutils, removing it frees
+# nothing because the content is in the base layer, and a linker without a
+# compiler builds nothing. See README.md.
+ARG SOURCE_REVISION=unknown
+RUN printf '/usr/local/lib\n' >/etc/ld.so.conf.d/ltfs.conf \
+	&& ldconfig \
+	&& install -d /usr/local/share/ltfs-autotools \
+	&& printf 'revision=%s\n' "$SOURCE_REVISION" \
+		>/usr/local/share/ltfs-autotools/build-revision \
+	&& /usr/local/bin/ltfs-autotools-self-test \
+	&& for cmd in gcc cc c++ g++ make autoconf automake libtoolize; do \
+		if command -v "$cmd" >/dev/null 2>&1; then \
+			echo "runtime image must not ship $cmd" >&2; \
+			exit 1; \
+		fi; \
+	done
+
+VOLUME ["/var/lib/ltfs", "/mnt/ltfs"]
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/ltfs-autotools-entrypoint"]
+CMD ["ltfs", "--help"]
