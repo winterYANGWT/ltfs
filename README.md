@@ -184,6 +184,28 @@ For nicer-looking progress bars while copying, it is also recommended you instal
 
 These instructions will get a copy of the project up and running on your local machine for development and testing purposes.
 
+## Build with Docker
+
+The `docker/` directory builds LTFS in a container, so no toolchain is needed on
+the host. Each image builds and smoke-tests the current source during its own
+build, so a successful build is a passing build.
+
+```
+# Minimal runtime image with the file tape backend
+docker buildx bake -f docker/docker-bake.hcl runtime-debian13 --load
+docker run --rm ltfs-autotools:local-debian13-runtime ltfs --version
+
+# Compile the working tree with the CI image; the install tree lands in ./out
+mkdir -p out
+docker run --rm \
+  --mount type=bind,src="$PWD",dst=/workspace,readonly \
+  --mount type=bind,src="$PWD/out",dst=/out \
+  ltfs-autotools:local-debian13-ci
+```
+
+Images cover Debian 13, Ubuntu 22.04/24.04 and Rocky Linux 9 in `ci`, `dev` and
+`runtime` roles. See [docker/autotools/README.md](docker/autotools/README.md).
+
 ## Prerequisites for build
 
 Please refer [this page](https://github.com/LinearTapeFileSystem/ltfs/wiki/Build-Environments).
