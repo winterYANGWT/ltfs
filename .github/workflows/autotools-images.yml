@@ -1,0 +1,179 @@
+# Builds lifecycle-scoped Autotools container images and discards the result.
+#
+# Each target compiles the current source and runs its smoke test inside the
+# build itself, so a green run means LTFS built and passed its checks on every
+# distribution in the matrix. Publication is intentionally not enabled here:
+# to publish, replace the cacheonly output with `push: true`, add a registry
+# login step, and grant the job `packages: write`.
+#
+# One job per distribution. The distributions are read out of the bake groups
+# rather than listed here, so adding one to docker-bake.hcl is enough to get it
+# built -- a hardcoded list would leave a new distribution silently untested.
+name: Autotools container images
+
+# Push and pull_request carry no filters on purpose, matching the first-generation
+# build workflows: any branch, any tag. A branch filter here meant the matrix never
+# ran on the release branch it was developed on. Tag pushes still reach the eol job
+# through its own `if:` below.
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autotools-images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: Check scripts and build definition
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      supported: ${{ steps.distributions.outputs.supported }}
+      eol: ${{ steps.distributions.outputs.eol }}
+    steps:
+      - name: Check out LTFS and submodules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Check scripts and build definition
+        run: |
+          bash docker/autotools/tests/test-image-entrypoint.sh
+          bash -n docker/autotools/scripts/*.sh docker/autotools/tests/*.sh
+          sh -n docker/autotools/scripts/icu-config
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Check bake definition
+        run: docker buildx bake -f docker/docker-bake.hcl --check
+
+      - name: Collect distributions from the bake groups
+        id: distributions
+        run: |
+          # Every group target is named <role>-<distribution>. The ci group names
+          # each supported distribution exactly once, the eol group each EOL one.
+          supported=$(docker buildx bake -f docker/docker-bake.hcl ci --print \
+            | jq -c '[.group.ci.targets[] | sub("^ci-"; "")]')
+          eol=$(docker buildx bake -f docker/docker-bake.hcl eol --print \
+            | jq -c '[.group.eol.targets[] | sub("^runtime-"; "")]')
+          printf 'supported=%s\n' "$supported" >>"$GITHUB_OUTPUT"
+          printf 'eol=%s\n' "$eol" >>"$GITHUB_OUTPUT"
+          printf 'supported: %s\neol: %s\n' "$supported" "$eol"
+
+  supported:
+    name: Supported ${{ matrix.distribution }}
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      # Every distribution reports its own result. Cancelling the rest on the
+      # first failure would hide whether a break is distribution-specific.
+      fail-fast: false
+      matrix:
+        distribution: ${{ fromJSON(needs.checks.outputs.supported) }}
+    steps:
+      - name: Check out LTFS and submodules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # One step per role so the log shows what each one costs. They share the
+      # builder, so dev and runtime start from the ci stages this first step
+      # already produced -- splitting adds visibility, not work.
+      #
+      # Only the runtime step exports cache. Its build graph
+      # (ci-base -> ci-validation -> ci -> runtime-builder -> runtime) is a
+      # superset of the ci graph, so one export with mode=max covers both and
+      # the scope is written exactly once per run. Dev's own apt layer is the
+      # only thing left uncached, and rebuilding it costs about ten seconds.
+      - name: Build ci
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          source: .
+          files: docker/docker-bake.hcl
+          targets: ci-${{ matrix.distribution }}
+          pull: true
+          set: |
+            *.output=type=cacheonly
+            *.cache-from=type=gha,scope=autotools-${{ matrix.distribution }}
+        env:
+          # Stamps the images and the build marker with the commit they came
+          # from; without it every image reports REVISION=local.
+          REVISION: ${{ github.sha }}
+
+      - name: Build dev
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          source: .
+          files: docker/docker-bake.hcl
+          targets: dev-${{ matrix.distribution }}
+          set: |
+            *.output=type=cacheonly
+            *.cache-from=type=gha,scope=autotools-${{ matrix.distribution }}
+        env:
+          REVISION: ${{ github.sha }}
+
+      - name: Build runtime
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          source: .
+          files: docker/docker-bake.hcl
+          targets: runtime-${{ matrix.distribution }}
+          set: |
+            *.output=type=cacheonly
+            *.cache-from=type=gha,scope=autotools-${{ matrix.distribution }}
+            *.cache-to=type=gha,scope=autotools-${{ matrix.distribution }},mode=max
+        env:
+          REVISION: ${{ github.sha }}
+
+  eol:
+    name: EOL ${{ matrix.distribution }}
+    needs: checks
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        distribution: ${{ fromJSON(needs.checks.outputs.eol) }}
+    steps:
+      - name: Check out LTFS and submodules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build the EOL Runtime image
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          source: .
+          files: docker/docker-bake.hcl
+          targets: runtime-${{ matrix.distribution }}
+          pull: true
+          set: |
+            *.output=type=cacheonly
+            *.cache-from=type=gha,scope=autotools-${{ matrix.distribution }}
+            *.cache-to=type=gha,scope=autotools-${{ matrix.distribution }},mode=max
+        env:
+          # Stamps the images and the build marker with the commit they came
+          # from; without it every image reports REVISION=local.
+          REVISION: ${{ github.sha }}
