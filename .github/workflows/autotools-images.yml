@@ -59,10 +59,11 @@ jobs:
       - name: Collect distributions from the bake groups
         id: distributions
         run: |
-          # Every group target is named <role>-<distribution>. The ci group names
-          # each supported distribution exactly once, the eol group each EOL one.
-          supported=$(docker buildx bake -f docker/docker-bake.hcl ci --print \
-            | jq -c '[.group.ci.targets[] | sub("^ci-"; "")]')
+          # Every group target is named <role>-<distribution>. The dev group
+          # names each supported distribution exactly once, the eol group each
+          # EOL one.
+          supported=$(docker buildx bake -f docker/docker-bake.hcl dev --print \
+            | jq -c '[.group.dev.targets[] | sub("^dev-"; "")]')
           eol=$(docker buildx bake -f docker/docker-bake.hcl eol --print \
             | jq -c '[.group.eol.targets[] | sub("^runtime-"; "")]')
           printf 'supported=%s\n' "$supported" >>"$GITHUB_OUTPUT"
@@ -90,21 +91,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      # One step per role so the log shows what each one costs. They share the
-      # builder, so dev and runtime start from the ci stages this first step
-      # already produced -- splitting adds visibility, not work.
+      # One step per published role so the log shows what each one costs. Dev
+      # builds the internal ci stages on the way, and runtime reuses them from
+      # the shared builder -- splitting adds visibility, not work.
       #
       # Only the runtime step exports cache. Its build graph
       # (ci-base -> ci-validation -> ci -> runtime-builder -> runtime) is a
-      # superset of the ci graph, so one export with mode=max covers both and
-      # the scope is written exactly once per run. Dev's own apt layer is the
-      # only thing left uncached, and rebuilding it costs about ten seconds.
-      - name: Build ci
+      # superset of dev's, so one export with mode=max covers both and the
+      # scope is written exactly once per run. Dev's own apt layer is the only
+      # thing left uncached, and rebuilding it costs about ten seconds.
+      - name: Build dev
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         with:
           source: .
           files: docker/docker-bake.hcl
-          targets: ci-${{ matrix.distribution }}
+          targets: dev-${{ matrix.distribution }}
           pull: true
           set: |
             *.output=type=cacheonly
@@ -112,18 +113,6 @@ jobs:
         env:
           # Stamps the images and the build marker with the commit they came
           # from; without it every image reports REVISION=local.
-          REVISION: ${{ github.sha }}
-
-      - name: Build dev
-        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
-        with:
-          source: .
-          files: docker/docker-bake.hcl
-          targets: dev-${{ matrix.distribution }}
-          set: |
-            *.output=type=cacheonly
-            *.cache-from=type=gha,scope=autotools-${{ matrix.distribution }}
-        env:
           REVISION: ${{ github.sha }}
 
       - name: Build runtime

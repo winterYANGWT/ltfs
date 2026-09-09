@@ -3,9 +3,10 @@
 #   docker buildx bake -f docker/docker-bake.hcl                    # supported images
 #   docker buildx bake -f docker/docker-bake.hcl all                # supported and EOL
 #   docker buildx bake -f docker/docker-bake.hcl runtime --load     # supported runtimes
-#   docker buildx bake -f docker/docker-bake.hcl ci-debian13 --load # one image
+#   docker buildx bake -f docker/docker-bake.hcl dev-debian13 --load # one image
 #
 # Tag schema: ltfs-autotools:<VERSION>-<distribution>-<role>
+# Roles published: dev (full toolchain) and runtime (no toolchain).
 
 variable "REGISTRY" {
   default = "docker.io"
@@ -193,22 +194,12 @@ function "tags" {
   ]
 }
 
-# Six stable entry points. EOL images never enter the default PR/push build.
+# Five stable entry points. EOL images never enter the default PR/push build.
+# Two roles are published: dev, which carries everything needed to build and
+# debug, and runtime, which carries no toolchain at all. See autotools/README.md
+# for the stages behind them.
 group "default" {
-  targets = ["ci", "dev", "runtime"]
-}
-
-group "ci" {
-  targets = [
-    "ci-ubuntu2604",
-    "ci-ubuntu2404",
-    "ci-ubuntu2204",
-    "ci-debian13",
-    "ci-debian12",
-    "ci-rocky10",
-    "ci-rocky9",
-    "ci-rocky8",
-  ]
+  targets = ["dev", "runtime"]
 }
 
 group "dev" {
@@ -270,25 +261,6 @@ target "_common" {
   }
 }
 
-target "ci-apt" {
-  matrix     = { distribution = APT_DISTRIBUTIONS }
-  name       = "ci-${distribution.id}"
-  inherits   = ["_common"]
-  dockerfile = "docker/autotools/Dockerfile.apt"
-  target     = "ci"
-  args = {
-    BASE_IMAGE = distribution.base_image
-  }
-  labels = {
-    "org.opencontainers.image.title"       = "LTFS CI - ${distribution.title}"
-    "org.opencontainers.image.description" = "LTFS Autotools CI toolchain for ${distribution.title}"
-    "io.ltfs.image.role"                   = "ci"
-    "io.ltfs.image.distribution"           = distribution.id
-    "io.ltfs.distribution.lifecycle"       = "supported"
-  }
-  tags = tags(distribution.id, "ci")
-}
-
 target "dev-apt" {
   matrix     = { distribution = APT_DISTRIBUTIONS }
   name       = "dev-${distribution.id}"
@@ -328,27 +300,6 @@ target "runtime-apt" {
     "io.ltfs.runtime.default-backend"      = "file"
   }
   tags = tags(distribution.id, "runtime")
-}
-
-target "ci-rpm" {
-  matrix     = { distribution = RPM_DISTRIBUTIONS }
-  name       = "ci-${distribution.id}"
-  inherits   = ["_common"]
-  dockerfile = "docker/autotools/Dockerfile.rpm"
-  target     = "ci"
-  args = {
-    AUTOTOOLS_PROFILE = distribution.profile
-    BASE_IMAGE        = distribution.base_image
-    CRB_REPO_NAME     = distribution.crb_repo_name
-  }
-  labels = {
-    "org.opencontainers.image.title"       = "LTFS CI - ${distribution.title}"
-    "org.opencontainers.image.description" = "LTFS Autotools CI toolchain for ${distribution.title}"
-    "io.ltfs.image.role"                   = "ci"
-    "io.ltfs.image.distribution"           = distribution.id
-    "io.ltfs.distribution.lifecycle"       = "supported"
-  }
-  tags = tags(distribution.id, "ci")
 }
 
 target "dev-rpm" {

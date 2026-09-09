@@ -6,7 +6,7 @@ images, see [`../README.md`](../README.md).
 ## Stage graph
 
 Supported distributions (`Dockerfile.apt`, `Dockerfile.rpm`) — one file per
-package manager, all three roles:
+package manager. Both published roles, plus the internal `ci` stage they share:
 
 ```text
 ${BASE_IMAGE} ──▶ ci-base ──┬──▶ ci-validation ──(pass marker only)──┐
@@ -18,16 +18,19 @@ ${RUNTIME_BASE_IMAGE} ───────────────────�
 ```
 
 `ci-validation` copies the source in, compiles it, installs to root, and
-smoke-tests it. Only `/tmp/ci-build-self-test` is copied forward, so the
-published `ci` image proves a build happened without shipping the source or the
-binary. `runtime-builder` builds a second time with the `runtime-file` profile
+smoke-tests it. Only `/tmp/ci-build-self-test` is copied forward, so `dev`
+inherits proof that a build happened without shipping the source or the binary.
+
+`ci` is a stage, not a published image. It carries the toolchain and the pass
+marker; `dev` adds the interactive tools on top and is what ships. Publishing
+both would be two images for one capability, since `dev` is a strict superset. `runtime-builder` builds a second time with the `runtime-file` profile
 and stages into `/tmp/ltfs-stage`; `runtime` starts from a clean base and copies
 only that tree, which is why no compiler can reach the final image.
 
 EOL distributions (`Dockerfile.apt-eol`, `Dockerfile.rpm-eol`) are runtime only:
 `builder` stages a tree, the glibc floor check gates it, and `runtime` starts
 from the *same* `${BASE_IMAGE}` so the artifacts keep that release's glibc
-floor. There is no `ci` or `dev` — an EOL image exists to run LTFS on an old
+floor. There is no `dev` — an EOL image exists to run LTFS on an old
 host, not to develop on one.
 
 ## Why four Dockerfiles
@@ -71,7 +74,8 @@ untouched.
 ## What each role's self-test checks
 
 `self-test.sh` is shipped in every image and dispatches on `LTFS_IMAGE_ROLE`.
-`ci` and `dev` share a branch; `runtime` is separate.
+`ci` and `dev` share a branch (the role env is `ci` in the shared stage and
+`dev` in the published one); `runtime` is separate.
 
 **`ci` and `dev`** check that the toolchain is present and works — `autoconf`,
 `automake`, `gcc`, `make`, `libtoolize`, `python`, `tar`, then `icu-config

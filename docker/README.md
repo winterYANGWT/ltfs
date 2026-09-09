@@ -1,6 +1,6 @@
 # LTFS container images
 
-One Bake definition builds LTFS for 16 distributions in three roles — 32 targets
+One Bake definition builds LTFS for 16 distributions in two roles — 24 targets
 in total. `linux/amd64` only.
 
 Use these images to build LTFS reproducibly on a distribution you do not run, to
@@ -10,7 +10,7 @@ without installing a toolchain on the host.
 ## Quick start
 
 ```sh
-# The 24 supported targets
+# The 16 supported targets
 docker buildx bake -f docker/docker-bake.hcl
 
 # One target, loaded into the local daemon
@@ -27,13 +27,13 @@ refuse artifacts that need a newer glibc than the target release provides.
 
 ## Image matrix
 
-Supported distributions produce all three roles:
+Supported distributions produce both roles:
 
-| Distribution | `ci` | `dev` | `runtime` |
-| --- | :---: | :---: | :---: |
-| `ubuntu2604` `ubuntu2404` `ubuntu2204` | ✓ | ✓ | ✓ |
-| `debian13` `debian12` | ✓ | ✓ | ✓ |
-| `rocky10` `rocky9` `rocky8` | ✓ | ✓ | ✓ |
+| Distribution | `dev` | `runtime` |
+| --- | :---: | :---: |
+| `ubuntu2604` `ubuntu2404` `ubuntu2204` | ✓ | ✓ |
+| `debian13` `debian12` | ✓ | ✓ |
+| `rocky10` `rocky9` `rocky8` | ✓ | ✓ |
 
 EOL distributions produce `runtime` only, each with a glibc ceiling enforced at
 build time:
@@ -59,18 +59,17 @@ build time:
 
 | Role | Contents | Default command |
 | --- | --- | --- |
-| `ci` | Full Autotools toolchain; compiles a mounted source tree into `/out` | `ltfs-autotools-build` |
-| `dev` | `ci` plus gdb, ccache, strace, git; runs as root | `/bin/bash` |
+| `dev` | Full Autotools toolchain plus gdb, ccache, strace, git; compiles a mounted source tree into `/out`; runs as root | `/bin/bash` |
 | `runtime` | No toolchain; sg, file, and itdtimg backends, file by default | `ltfs --help` |
 
-`ci` and `dev` ship no installed `ltfs`: the source tree and its build products
-live only in a disposable stage, so the image carries a pass marker naming the
-source revision rather than a binary. Build one with `ltfs-autotools-build`.
+`dev` ships no installed `ltfs`: the source tree and its build products live only
+in a disposable stage, so the image carries a pass marker naming the source
+revision rather than a binary. Build one with `ltfs-autotools-build`.
 
 ## Tags, variables, and groups
 
 Tags are `<REGISTRY>/<IMAGE_NAMESPACE>/ltfs-autotools:<VERSION>-<distribution>-<role>`,
-which with the defaults below is `ltfs-autotools:local-debian13-ci`.
+which with the defaults below is `ltfs-autotools:local-debian13-dev`.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -79,7 +78,7 @@ which with the defaults below is `ltfs-autotools:local-debian13-ci`.
 | `REGISTRY` | `docker.io` | Registry host |
 | `IMAGE_NAMESPACE` | `library` | Namespace under the registry |
 
-Six groups are the stable entry points — `default` (all supported), `ci`, `dev`,
+Five groups are the stable entry points — `default` (all supported), `dev`,
 `runtime`, `eol`, and `all`. `default` never contains an EOL target, which is
 what keeps EOL images out of pull-request builds.
 
@@ -90,30 +89,34 @@ docker buildx bake -f docker/docker-bake.hcl default \
   --set '*.output=type=cacheonly' --progress=plain
 ```
 
-## Using the CI image
-
-Mount the source read-only and give it an empty `/out` for the staging tree:
-
-```sh
-mkdir -p .artifacts/debian13
-docker run --rm \
-  --mount type=bind,src="$PWD",dst=/workspace,readonly \
-  --mount type=bind,src="$PWD/.artifacts/debian13",dst=/out \
-  ltfs-autotools:local-debian13-ci
-```
-
-`AUTOTOOLS_PROFILE=default|strict|runtime-file`, `JOBS`, `CONFIGURE_ARGS`,
-`SOURCE_DIR`, and `OUTPUT_DIR` are the knobs. `OUTPUT_DIR` must be empty so
-artifacts from different builds cannot mix. Rocky 8 and 9 default to `strict`;
-Rocky 10 uses `default` pending an upstream `_FORTIFY_SOURCE` fix.
-
 ## Using the Dev image
+
+Interactively — it drops you in a shell with the source mounted:
 
 ```sh
 docker run --rm -it \
   --mount type=bind,src="$PWD",dst=/workspace \
   ltfs-autotools:local-debian13-dev
 ```
+
+Or non-interactively, for a build in CI. Mount the source read-only and give it
+an empty `/out` for the staging tree:
+
+```sh
+mkdir -p .artifacts/debian13
+docker run --rm \
+  --mount type=bind,src="$PWD",dst=/workspace,readonly \
+  --mount type=bind,src="$PWD/.artifacts/debian13",dst=/out \
+  ltfs-autotools:local-debian13-dev ltfs-autotools-build
+```
+
+The command name is spelled out because `dev` defaults to an interactive shell,
+so something has to be passed for a non-interactive build.
+
+`AUTOTOOLS_PROFILE=default|strict|runtime-file`, `JOBS`, `CONFIGURE_ARGS`,
+`SOURCE_DIR`, and `OUTPUT_DIR` are the knobs. `OUTPUT_DIR` must be empty so
+artifacts from different builds cannot mix. Rocky 8 and 9 default to `strict`;
+Rocky 10 uses `default` pending an upstream `_FORTIFY_SOURCE` fix.
 
 Dev runs as root so FUSE and device debugging work, but adds no `--privileged`
 of its own. Files it creates in a bind mount may end up root-owned on the host;
