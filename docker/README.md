@@ -51,9 +51,56 @@ build time:
 
 > EOL base systems and their frozen archives receive no security updates. They
 > exist for deployments that must match an old userspace, kernel, or Docker, and
-> are built from a clone rather than published — see
+> are built from a clone rather than published or built in CI — see
 > [Publishing policy](#publishing-policy). Pushing one to a public registry
 > requires a product owner explicitly accepting that risk.
+
+### Building an EOL image
+
+Nothing automated builds these, so verification is by hand and recorded per
+distribution — they enter EOL at different times, and an archive can go away for
+one while the rest are fine.
+
+| Distribution | Last verified | Commit |
+| --- | --- | --- |
+| `debian11` | 2026-09-10 | `3a8ac9bfe5bec69112f214b1b10fcc1815cd12f2` |
+| `ubuntu2004` | 2026-09-10 | `3a8ac9bfe5bec69112f214b1b10fcc1815cd12f2` |
+| `debian10` | 2026-09-10 | `3a8ac9bfe5bec69112f214b1b10fcc1815cd12f2` |
+| `ubuntu1804` | 2026-09-10 | `3a8ac9bfe5bec69112f214b1b10fcc1815cd12f2` |
+| `debian9` | 2026-09-10 | `3a8ac9bfe5bec69112f214b1b10fcc1815cd12f2` |
+| `ubuntu1604` | 2026-09-10 | `3a8ac9bfe5bec69112f214b1b10fcc1815cd12f2` |
+| `centos7` | 2026-09-10 | `3a8ac9bfe5bec69112f214b1b10fcc1815cd12f2` |
+| `fedora28` | 2026-09-10 | `3a8ac9bfe5bec69112f214b1b10fcc1815cd12f2` |
+
+Verified means the image built and passed its own `self-test`. The rows share a
+commit today only because they were checked together; they drift apart as
+distributions are re-checked, or as a newly retired one is added with a commit of
+its own.
+
+Try the current tree first. If the build fails — a frozen archive has moved, most
+likely — fall back to that distribution's recorded commit:
+
+```sh
+git checkout 3a8ac9bfe5bec69112f214b1b10fcc1815cd12f2
+git submodule update --init --recursive
+
+REVISION=$(git rev-parse HEAD) \
+  docker buildx bake -f docker/docker-bake.hcl runtime-centos7 --load
+```
+
+`REVISION` is worth passing. It stamps the commit into
+`/usr/local/share/ltfs-autotools/build-revision` and adds a
+`sha-<REVISION>-<distribution>-runtime` tag, so the image can say for itself which
+source it came from:
+
+```sh
+docker run --rm ltfs-autotools:local-centos7-runtime self-test
+docker run --rm --entrypoint cat ltfs-autotools:local-centos7-runtime \
+  /usr/local/share/ltfs-autotools/build-revision
+```
+
+Those two commands are also how you update a row: build the distribution from the
+current tree, confirm the self-test passes, and record the commit you built.
 
 ## Roles
 
@@ -80,7 +127,7 @@ which with the defaults below is `ltfs-autotools:local-debian13-dev`.
 
 Five groups are the stable entry points — `default` (all supported), `dev`,
 `runtime`, `eol`, and `all`. `default` never contains an EOL target, which is
-what keeps EOL images out of pull-request builds.
+what keeps EOL images out of CI entirely — the workflow builds `default` only.
 
 ```sh
 docker buildx bake -f docker/docker-bake.hcl all
@@ -171,11 +218,17 @@ their own release.
 ## CI and publishing
 
 `.github/workflows/autotools-images.yml` derives its distribution list from the
-bake groups, then fans out one job per distribution. The `supported` jobs run on
-every push and pull request, on a weekly schedule, and on manual dispatch; the
-`eol` jobs run only on schedule, manual dispatch, and `v*` tags. Every job
-outputs `cacheonly` into a per-distribution cache scope, so they validate
-without publishing.
+bake groups, then fans out one job per in-support distribution. Those jobs run on
+every push and pull request, on a weekly schedule, and on manual dispatch. Each
+outputs `cacheonly` into a per-distribution cache scope, so they validate without
+publishing.
+
+**EOL images are not built in CI at all.** They exist for people who need to run
+LTFS on an old userspace, and are built from a clone by whoever needs one, so a
+weekly run would spend CI on something no maintainer acts on. Their bake and
+Dockerfile definitions are still linted by `bake all --check` in the `checks`
+job, which is what stops a broken definition reaching the people who do build
+them.
 
 Publishing supported images means adding a registry login, `packages: write`,
 and `push: true`.
