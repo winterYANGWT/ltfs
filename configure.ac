@@ -312,6 +312,15 @@ then
 fi
 
 dnl
+dnl Check for the dynamic loader used by the plugin subsystem.  Older glibc
+dnl releases provide dlopen(3) in libdl, while newer releases provide it from
+dnl libc.  AC_SEARCH_LIBS handles both layouts without relying on an unrelated
+dnl dependency (for example net-snmp) to add -ldl implicitly.
+dnl
+AC_SEARCH_LIBS([dlopen], [dl],,
+    [AC_MSG_ERROR([required dynamic loader support missing])])
+
+dnl
 dnl Check for libcam, libbsdxml (expat), libmt and libexecinfo on FreeBSD
 dnl
 if test "x${host_freebsd}" = "xyes"
