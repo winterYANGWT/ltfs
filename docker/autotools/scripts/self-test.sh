@@ -130,6 +130,24 @@ case "$role" in
 			/usr/local/bin/ltfs-autotools-entrypoint >/dev/null
 		LTFS_SELF_TEST_ON_START=0 \
 			/usr/local/bin/ltfs-autotools-entrypoint --help >/dev/null
+
+		# `ltfs -a` exits 1 by design, so its status cannot be asserted with
+		# set -e. It is checked because it reaches libfuse's module help, which
+		# dies in strdup() when LANG names a locale the image does not
+		# generate; --help never gets there, which is why it missed that. A
+		# signal death is the regression; the marker catches output that stops
+		# before LTFS prints its own options.
+		advanced_help_status=0
+		advanced_help=$(LTFS_SELF_TEST_ON_START=0 \
+			/usr/local/bin/ltfs-autotools-entrypoint -a 2>&1) || advanced_help_status=$?
+		if ((advanced_help_status >= 128)); then
+			printf 'ltfs -a terminated by signal %s\n' "$((advanced_help_status - 128))" >&2
+			exit 1
+		fi
+		if [[ $advanced_help != *tape_backend=* ]]; then
+			printf 'ltfs -a did not print LTFS advanced options\n' >&2
+			exit 1
+		fi
 		;;
 	*)
 		printf 'LTFS_IMAGE_ROLE must be ci, dev, or runtime: %s\n' "$role" >&2

@@ -50,13 +50,19 @@ COPY --chmod=0755 docker/autotools/scripts/self-test.sh /usr/local/bin/ltfs-auto
 COPY --chmod=0755 docker/autotools/scripts/smoke-test.sh /usr/local/bin/ltfs-autotools-smoke-test
 
 ARG AUTOTOOLS_PROFILE=strict
-# ltfs, ltfsck, and mkltfs each set LANG to en_US.UTF-8 when it is unset, but
-# only after writing LTFS9015W to stderr, which then leads every invocation's
-# output. Setting the same value they would choose keeps behaviour identical
-# and keeps the first line of `ltfs --version` the version. Every stage sets
-# it, so the warning cannot come back in one role after being fixed in another.
+# ltfs, ltfsck, and mkltfs each set LANG when it is unset, but only after
+# writing LTFS9015W to stderr, which then leads every invocation's output.
+# Setting it here keeps the first line of `ltfs --version` the version. Every
+# stage sets it, so the warning cannot come back in one role after being fixed
+# in another.
+#
+# C.UTF-8, not the en_US.UTF-8 those tools would pick: these base images do not
+# generate en_US.UTF-8, so setlocale(LC_CTYPE, "") returns NULL, and libfuse
+# 2.9.9 dereferences that unguarded (iconv.c:648, strdup(setlocale(...))) while
+# printing module help. `ltfs -a` therefore segfaults. C.UTF-8 always exists
+# here and suppresses LTFS9015W just as well.
 ENV AUTOTOOLS_PROFILE=${AUTOTOOLS_PROFILE} \
-	LANG=en_US.UTF-8 \
+	LANG=C.UTF-8 \
 	LTFS_IMAGE_ROLE=ci
 
 WORKDIR /workspace
@@ -159,7 +165,7 @@ COPY --chmod=0755 docker/autotools/scripts/smoke-test.sh /usr/local/bin/ltfs-aut
 
 # Runtime starts from its own base, so it repeats the LANG setting ci-base
 # makes; see the comment there.
-ENV LANG=en_US.UTF-8 \
+ENV LANG=C.UTF-8 \
 	LTFS_IMAGE_ROLE=runtime
 
 # Records the source commit, then asserts the runtime cannot compile. ld and as

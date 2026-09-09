@@ -13,8 +13,11 @@ FROM ${BASE_IMAGE} AS builder
 ARG DISTRO_ID
 ARG EXTRA_BUILD_PACKAGES=""
 
-# Same LANG rationale as the runtime stage below.
-ENV LANG=en_US.UTF-8
+# Same LANG rationale as the runtime stage below. Parameterised because
+# CentOS 7's glibc 2.17 predates C.UTF-8; bake supplies en_US.UTF-8 there,
+# which that base image does generate.
+ARG IMAGE_LANG=C.UTF-8
+ENV LANG=${IMAGE_LANG}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -100,11 +103,15 @@ COPY --chmod=0755 docker/autotools/scripts/format-file-backend-test.sh /usr/loca
 COPY --chmod=0755 docker/autotools/scripts/self-test.sh /usr/local/bin/ltfs-autotools-self-test
 COPY --chmod=0755 docker/autotools/scripts/smoke-test.sh /usr/local/bin/ltfs-autotools-smoke-test
 
-# ltfs, ltfsck, and mkltfs each set LANG to en_US.UTF-8 when it is unset, but
-# only after writing LTFS9015W to stderr, which then leads every invocation's
-# output. Setting the same value they would choose keeps behaviour identical
-# and keeps the first line of `ltfs --version` the version.
-ENV LANG=en_US.UTF-8 \
+# ltfs, ltfsck, and mkltfs each set LANG when it is unset, but only after
+# writing LTFS9015W to stderr, which then leads every invocation's output.
+# Setting it here keeps the first line of `ltfs --version` the version.
+#
+# C.UTF-8, not the en_US.UTF-8 those tools would pick: an ungenerated locale
+# makes setlocale(LC_CTYPE, "") return NULL, which libfuse 2.9.9 dereferences
+# unguarded while printing module help, segfaulting `ltfs -a`.
+ARG IMAGE_LANG=C.UTF-8
+ENV LANG=${IMAGE_LANG} \
 	LTFS_IMAGE_ROLE=runtime
 
 # Records the source commit, then asserts the runtime cannot compile. ld and as

@@ -163,6 +163,8 @@ variable "EOL_RPM_DISTRIBUTIONS" {
       base_image             = "centos:centos7"
       runtime_packages       = "fuse-libs libicu libuuid libxml2"
       max_glibc_symbol       = "2.17"
+      # glibc 2.17 predates C.UTF-8; this base image does generate en_US.UTF-8.
+      image_lang             = "en_US.UTF-8"
       pyxattr_via_pip        = "1"
       extra_build_packages   = ""
       extra_runtime_packages = ""
@@ -173,6 +175,7 @@ variable "EOL_RPM_DISTRIBUTIONS" {
       base_image             = "fedora:28"
       runtime_packages       = "fuse-libs libicu libuuid libxml2"
       max_glibc_symbol       = "2.27"
+      image_lang             = "C.UTF-8"
       pyxattr_via_pip        = "0"
       extra_build_packages   = ""
       extra_runtime_packages = "python3-pyxattr"
@@ -429,6 +432,7 @@ target "runtime-eol-rpm" {
     DISTRO_ID              = distribution.id
     EXTRA_BUILD_PACKAGES   = distribution.extra_build_packages
     EXTRA_RUNTIME_PACKAGES = distribution.extra_runtime_packages
+    IMAGE_LANG             = distribution.image_lang
     LTFS_MAX_GLIBC_SYMBOL  = distribution.max_glibc_symbol
     PYXATTR_VIA_PIP        = distribution.pyxattr_via_pip
     RUNTIME_PACKAGES       = distribution.runtime_packages
